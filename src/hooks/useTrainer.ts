@@ -1,6 +1,6 @@
 import { useReducer, useCallback, useEffect } from 'react';
 import { TrainerState, TrainerAction, Token, TrainerSettings, TrainerStats } from '@/types/trainer';
-import { tokenize, extractSentences, compareToken } from '@/utils/tokenizer';
+import { tokenize, extractSentences } from '@/utils/tokenizer';
 
 const DEFAULT_SETTINGS: TrainerSettings = {
   mode: 'loose',
@@ -39,11 +39,17 @@ function getNextActiveIndex(tokens: Token[], currentIndex: number, showPunctuati
     if (showPunctuation || !tokens[nextIndex].isPunctuation) {
       return nextIndex;
     }
-    // Auto-mark punctuation as correct if not shown
     tokens[nextIndex].status = 'correct';
     nextIndex++;
   }
   return nextIndex;
+}
+
+function normalizeForComparison(text: string, mode: 'strict' | 'loose'): string {
+  if (mode === 'strict') {
+    return text;
+  }
+  return text.toLowerCase();
 }
 
 function trainerReducer(state: TrainerState, action: TrainerAction): TrainerState {
@@ -52,7 +58,6 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
       const tokens = tokenize(action.payload);
       const sentences = extractSentences(action.payload);
       
-      // Find first non-punctuation token if not showing punctuation
       let activeIndex = 0;
       if (!state.settings.showPunctuation) {
         while (activeIndex < tokens.length && tokens[activeIndex].isPunctuation) {
@@ -81,33 +86,27 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
     }
 
     case 'TYPE_CHAR': {
-      if (state.isPaused || state.isCompleted) return state;
-      
-      const newStats = { ...state.stats };
-      if (!state.isStarted) {
-        newStats.startTime = Date.now();
-      }
-      newStats.totalKeystrokes++;
-      
-      return {
-        ...state,
-        typedBuffer: state.typedBuffer + action.payload,
-        stats: newStats,
-        isStarted: true,
-      };
-    }
-
-    case 'SUBMIT_TOKEN': {
       if (state.isPaused || state.isCompleted || state.activeIndex >= state.tokens.length) {
         return state;
       }
 
       const currentToken = state.tokens[state.activeIndex];
-      const isCorrect = compareToken(state.typedBuffer, currentToken, state.settings.mode);
-      const newTokens = [...state.tokens];
+      const newBuffer = state.typedBuffer + action.payload;
       const newStats = { ...state.stats };
+      
+      if (!state.isStarted) {
+        newStats.startTime = Date.now();
+      }
+      newStats.totalKeystrokes++;
 
-      if (isCorrect) {
+      const targetWord = currentToken.original;
+      const normalizedBuffer = normalizeForComparison(newBuffer, state.settings.mode);
+      const normalizedTarget = normalizeForComparison(targetWord, state.settings.mode);
+
+      // Check if complete match
+      if (normalizedBuffer === normalizedTarget) {
+        // Correct! Move to next token
+        const newTokens = [...state.tokens];
         newTokens[state.activeIndex] = { ...currentToken, status: 'correct' };
         newStats.correctCount++;
         
@@ -121,6 +120,7 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
             activeIndex: nextIndex,
             typedBuffer: '',
             stats: newStats,
+            isStarted: true,
             isCompleted: true,
           };
         }
@@ -133,25 +133,60 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
           activeIndex: nextIndex,
           typedBuffer: '',
           stats: newStats,
+          isStarted: true,
+        };
+      }
+
+      // Check if partial match (on the right track)
+      const isPartialMatch = normalizedTarget.startsWith(normalizedBuffer);
+      
+      if (isPartialMatch) {
+        // Typing correctly so far, keep active status
+        return {
+          ...state,
+          typedBuffer: newBuffer,
+          stats: newStats,
+          isStarted: true,
         };
       } else {
+        // Wrong character typed - mark as incorrect
+        const newTokens = [...state.tokens];
         newTokens[state.activeIndex] = { ...currentToken, status: 'incorrect' };
         newStats.errorCount++;
         
         return {
           ...state,
           tokens: newTokens,
-          typedBuffer: '',
+          typedBuffer: newBuffer,
           stats: newStats,
+          isStarted: true,
         };
       }
     }
 
     case 'BACKSPACE': {
       if (state.typedBuffer.length === 0) return state;
+      
+      const newBuffer = state.typedBuffer.slice(0, -1);
+      const currentToken = state.tokens[state.activeIndex];
+      
+      if (!currentToken) return state;
+      
+      const targetWord = currentToken.original;
+      const normalizedBuffer = normalizeForComparison(newBuffer, state.settings.mode);
+      const normalizedTarget = normalizeForComparison(targetWord, state.settings.mode);
+      const isPartialMatch = newBuffer === '' || normalizedTarget.startsWith(normalizedBuffer);
+      
+      const newTokens = [...state.tokens];
+      newTokens[state.activeIndex] = { 
+        ...currentToken, 
+        status: isPartialMatch ? 'active' : 'incorrect' 
+      };
+      
       return {
         ...state,
-        typedBuffer: state.typedBuffer.slice(0, -1),
+        tokens: newTokens,
+        typedBuffer: newBuffer,
       };
     }
 
@@ -267,7 +302,6 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
 export function useTrainer() {
   const [state, dispatch] = useReducer(trainerReducer, initialState);
 
-  // Load saved settings from localStorage
   useEffect(() => {
     const savedSettings = localStorage.getItem('typingTrainerSettings');
     if (savedSettings) {
@@ -280,7 +314,6 @@ export function useTrainer() {
     }
   }, []);
 
-  // Save settings to localStorage when they change
   useEffect(() => {
     localStorage.setItem('typingTrainerSettings', JSON.stringify(state.settings));
   }, [state.settings]);
@@ -296,10 +329,8 @@ export function useTrainer() {
     if (e.key === 'Backspace') {
       e.preventDefault();
       dispatch({ type: 'BACKSPACE' });
-    } else if (e.key === ' ' || e.key === 'Enter') {
+    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
       e.preventDefault();
-      dispatch({ type: 'SUBMIT_TOKEN' });
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
       dispatch({ type: 'TYPE_CHAR', payload: e.key });
     }
   }, [state.isPaused, state.isCompleted]);
@@ -316,7 +347,6 @@ export function useTrainer() {
     dispatch({ type: 'SELECT_RANGE', payload: range });
   }, []);
 
-  // Calculate WPM and accuracy
   const calculateStats = useCallback(() => {
     const { stats, isStarted } = state;
     

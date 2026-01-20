@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import { useTrainer } from '@/hooks/useTrainer';
 import { TextInputPanel } from '@/components/trainer/TextInputPanel';
 import { TokenLine } from '@/components/trainer/TokenLine';
@@ -22,15 +23,38 @@ const Index = () => {
     calculateStats,
   } = useTrainer();
 
+  const containerRef = useRef<HTMLDivElement>(null);
   const { wpm, accuracy, time } = calculateStats();
   const currentToken = state.tokens[state.activeIndex] || null;
 
+  // Global keyboard handler
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Only handle if we're in typing mode
+      if (state.tokens.length === 0 || state.isPaused || state.isCompleted) return;
+      
+      // Don't capture if user is typing in textarea
+      if ((e.target as HTMLElement).tagName === 'TEXTAREA') return;
+
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleKeyDown(e as unknown as React.KeyboardEvent);
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        handleKeyDown(e as unknown as React.KeyboardEvent);
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [state.tokens.length, state.isPaused, state.isCompleted, handleKeyDown]);
+
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background" ref={containerRef}>
       {/* Header */}
       <header className="border-b border-border bg-card/50 backdrop-blur-sm sticky top-0 z-10">
         <div className="container max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-4">
             <div className="flex items-center gap-3">
               <div className="p-2 bg-primary rounded-xl">
                 <Keyboard className="w-6 h-6 text-primary-foreground" />
@@ -64,7 +88,7 @@ const Index = () => {
 
             {/* Token Display */}
             <section className="bg-card rounded-2xl border border-border p-6 shadow-sm">
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
                 <h2 className="text-lg font-semibold flex items-center gap-2">
                   <BookOpen className="w-5 h-5 text-primary" />
                   Text
@@ -89,11 +113,7 @@ const Index = () => {
             </section>
 
             {/* Typing Input */}
-            <section 
-              className="bg-card rounded-2xl border border-border p-6 shadow-sm"
-              onKeyDown={handleKeyDown}
-              tabIndex={0}
-            >
+            <section className="bg-card rounded-2xl border border-border p-6 shadow-sm">
               <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
                 <Keyboard className="w-5 h-5 text-primary" />
                 Type Here
@@ -103,11 +123,10 @@ const Index = () => {
                 currentToken={currentToken}
                 isPaused={state.isPaused}
                 isCompleted={state.isCompleted}
-                onKeyDown={handleKeyDown}
+                onKeyDown={() => {}} // Handled globally now
               />
               <p className="mt-3 text-sm text-muted-foreground">
-                Press <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs font-mono">Space</kbd> or{' '}
-                <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs font-mono">Enter</kbd> to submit
+                Gõ liên tục - tự động chuyển từ khi đúng. Nếu sai, sửa lại bằng <kbd className="px-1.5 py-0.5 bg-muted rounded text-xs font-mono">Backspace</kbd>
               </p>
             </section>
 
