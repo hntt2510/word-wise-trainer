@@ -1,5 +1,5 @@
 import { useReducer, useCallback, useEffect } from 'react';
-import { TrainerState, TrainerAction, Token, TrainerSettings, TrainerStats } from '@/types/trainer';
+import { TrainerState, TrainerAction, Token, Sentence, TrainerSettings, TrainerStats } from '@/types/trainer';
 import { tokenize, extractSentences } from '@/utils/tokenizer';
 
 const DEFAULT_SETTINGS: TrainerSettings = {
@@ -8,6 +8,7 @@ const DEFAULT_SETTINGS: TrainerSettings = {
   autoAdvance: true,
   soundEnabled: false,
   allowRewind: false,
+  inputMode: 'sentence', // Mặc định là nhập từng câu
 };
 
 const DEFAULT_STATS: TrainerStats = {
@@ -22,7 +23,9 @@ const DEFAULT_STATS: TrainerStats = {
 const initialState: TrainerState = {
   originalText: '',
   tokens: [],
+  sentences: [],
   activeIndex: 0,
+  activeSentenceIndex: 0,
   typedBuffer: '',
   settings: DEFAULT_SETTINGS,
   stats: DEFAULT_STATS,
@@ -30,7 +33,7 @@ const initialState: TrainerState = {
   isStarted: false,
   isCompleted: false,
   selectedRange: null,
-  sentences: [],
+  isTypingActive: false,
 };
 
 function getNextActiveIndex(tokens: Token[], currentIndex: number, showPunctuation: boolean): number {
@@ -47,16 +50,26 @@ function getNextActiveIndex(tokens: Token[], currentIndex: number, showPunctuati
 
 function normalizeForComparison(text: string, mode: 'strict' | 'loose'): string {
   if (mode === 'strict') {
-    return text;
+    return text.trim();
   }
-  return text.toLowerCase();
+  return text.toLowerCase().trim();
+}
+
+function createSentences(text: string): Sentence[] {
+  const rawSentences = extractSentences(text);
+  return rawSentences.map((s, idx) => ({
+    id: idx,
+    text: s.trim(),
+    status: idx === 0 ? 'active' : 'pending',
+    userInput: '',
+  }));
 }
 
 function trainerReducer(state: TrainerState, action: TrainerAction): TrainerState {
   switch (action.type) {
     case 'LOAD_TEXT': {
       const tokens = tokenize(action.payload);
-      const sentences = extractSentences(action.payload);
+      const sentences = createSentences(action.payload);
       
       let activeIndex = 0;
       if (!state.settings.showPunctuation) {
@@ -76,12 +89,133 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
         tokens,
         sentences,
         activeIndex,
+        activeSentenceIndex: 0,
         typedBuffer: '',
         stats: DEFAULT_STATS,
         isPaused: false,
         isStarted: false,
         isCompleted: false,
         selectedRange: null,
+        isTypingActive: false,
+      };
+    }
+
+    case 'SET_TYPING_ACTIVE': {
+      return { ...state, isTypingActive: action.payload };
+    }
+
+    case 'SET_INPUT': {
+      const newStats = { ...state.stats };
+      if (!state.isStarted && action.payload.length > 0) {
+        newStats.startTime = Date.now();
+      }
+      newStats.totalKeystrokes++;
+      
+      return {
+        ...state,
+        typedBuffer: action.payload,
+        stats: newStats,
+        isStarted: action.payload.length > 0 || state.isStarted,
+      };
+    }
+
+    case 'SUBMIT_SENTENCE': {
+      if (state.isPaused || state.isCompleted) return state;
+      if (state.activeSentenceIndex >= state.sentences.length) return state;
+      
+      const currentSentence = state.sentences[state.activeSentenceIndex];
+      const userInput = state.typedBuffer.trim();
+      const targetText = currentSentence.text;
+      
+      const normalizedInput = normalizeForComparison(userInput, state.settings.mode);
+      const normalizedTarget = normalizeForComparison(targetText, state.settings.mode);
+      
+      const isCorrect = normalizedInput === normalizedTarget;
+      const newSentences = [...state.sentences];
+      const newStats = { ...state.stats };
+      
+      newSentences[state.activeSentenceIndex] = {
+        ...currentSentence,
+        status: isCorrect ? 'correct' : 'incorrect',
+        userInput,
+      };
+      
+      if (isCorrect) {
+        newStats.correctCount++;
+      } else {
+        newStats.errorCount++;
+      }
+      
+      const nextIndex = state.activeSentenceIndex + 1;
+      
+      if (nextIndex >= newSentences.length) {
+        newStats.endTime = Date.now();
+        return {
+          ...state,
+          sentences: newSentences,
+          activeSentenceIndex: nextIndex,
+          typedBuffer: '',
+          stats: newStats,
+          isCompleted: true,
+        };
+      }
+      
+      newSentences[nextIndex] = { ...newSentences[nextIndex], status: 'active' };
+      
+      return {
+        ...state,
+        sentences: newSentences,
+        activeSentenceIndex: nextIndex,
+        typedBuffer: '',
+        stats: newStats,
+      };
+    }
+
+    case 'SKIP_SENTENCE': {
+      if (state.isPaused || state.isCompleted) return state;
+      if (state.activeSentenceIndex >= state.sentences.length) return state;
+      
+      const newSentences = [...state.sentences];
+      const newStats = { ...state.stats };
+      
+      newSentences[state.activeSentenceIndex] = {
+        ...newSentences[state.activeSentenceIndex],
+        status: 'incorrect',
+        userInput: '[Skipped]',
+      };
+      newStats.skippedCount++;
+      
+      const nextIndex = state.activeSentenceIndex + 1;
+      
+      if (nextIndex >= newSentences.length) {
+        newStats.endTime = Date.now();
+        return {
+          ...state,
+          sentences: newSentences,
+          activeSentenceIndex: nextIndex,
+          typedBuffer: '',
+          stats: newStats,
+          isCompleted: true,
+        };
+      }
+      
+      newSentences[nextIndex] = { ...newSentences[nextIndex], status: 'active' };
+      
+      return {
+        ...state,
+        sentences: newSentences,
+        activeSentenceIndex: nextIndex,
+        typedBuffer: '',
+        stats: newStats,
+      };
+    }
+
+    case 'REVEAL_SENTENCE': {
+      if (state.activeSentenceIndex >= state.sentences.length) return state;
+      const currentSentence = state.sentences[state.activeSentenceIndex];
+      return {
+        ...state,
+        typedBuffer: currentSentence.text,
       };
     }
 
@@ -103,9 +237,7 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
       const normalizedBuffer = normalizeForComparison(newBuffer, state.settings.mode);
       const normalizedTarget = normalizeForComparison(targetWord, state.settings.mode);
 
-      // Check if complete match
       if (normalizedBuffer === normalizedTarget) {
-        // Correct! Move to next token
         const newTokens = [...state.tokens];
         newTokens[state.activeIndex] = { ...currentToken, status: 'correct' };
         newStats.correctCount++;
@@ -137,11 +269,9 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
         };
       }
 
-      // Check if partial match (on the right track)
       const isPartialMatch = normalizedTarget.startsWith(normalizedBuffer);
       
       if (isPartialMatch) {
-        // Typing correctly so far, keep active status
         return {
           ...state,
           typedBuffer: newBuffer,
@@ -149,7 +279,6 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
           isStarted: true,
         };
       } else {
-        // Wrong character typed - mark as incorrect
         const newTokens = [...state.tokens];
         newTokens[state.activeIndex] = { ...currentToken, status: 'incorrect' };
         newStats.errorCount++;
@@ -168,8 +297,12 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
       if (state.typedBuffer.length === 0) return state;
       
       const newBuffer = state.typedBuffer.slice(0, -1);
-      const currentToken = state.tokens[state.activeIndex];
       
+      if (state.settings.inputMode === 'sentence') {
+        return { ...state, typedBuffer: newBuffer };
+      }
+      
+      const currentToken = state.tokens[state.activeIndex];
       if (!currentToken) return state;
       
       const targetWord = currentToken.original;
@@ -239,8 +372,9 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
       if (!state.originalText) return state;
       
       const tokens = tokenize(state.originalText);
-      let activeIndex = 0;
+      const sentences = createSentences(state.originalText);
       
+      let activeIndex = 0;
       if (!state.settings.showPunctuation) {
         while (activeIndex < tokens.length && tokens[activeIndex].isPunctuation) {
           tokens[activeIndex].status = 'correct';
@@ -255,13 +389,16 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
       return {
         ...state,
         tokens,
+        sentences,
         activeIndex,
+        activeSentenceIndex: 0,
         typedBuffer: '',
         stats: DEFAULT_STATS,
         isPaused: false,
         isStarted: false,
         isCompleted: false,
         selectedRange: null,
+        isTypingActive: false,
       };
     }
 
@@ -281,17 +418,11 @@ function trainerReducer(state: TrainerState, action: TrainerAction): TrainerStat
     }
 
     case 'SELECT_RANGE': {
-      return {
-        ...state,
-        selectedRange: action.payload,
-      };
+      return { ...state, selectedRange: action.payload };
     }
 
     case 'CLEAR_SELECTION': {
-      return {
-        ...state,
-        selectedRange: null,
-      };
+      return { ...state, selectedRange: null };
     }
 
     default:
@@ -323,26 +454,60 @@ export function useTrainer() {
     localStorage.setItem('typingTrainerText', text);
   }, []);
 
+  const setInput = useCallback((value: string) => {
+    dispatch({ type: 'SET_INPUT', payload: value });
+  }, []);
+
+  const submitSentence = useCallback(() => {
+    dispatch({ type: 'SUBMIT_SENTENCE' });
+  }, []);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (state.isPaused || state.isCompleted) return;
 
-    if (e.key === 'Backspace') {
-      e.preventDefault();
-      dispatch({ type: 'BACKSPACE' });
-    } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
-      e.preventDefault();
-      dispatch({ type: 'TYPE_CHAR', payload: e.key });
+    if (state.settings.inputMode === 'word') {
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        dispatch({ type: 'BACKSPACE' });
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        dispatch({ type: 'TYPE_CHAR', payload: e.key });
+      }
     }
-  }, [state.isPaused, state.isCompleted]);
+    if (state.settings.inputMode === 'sentence' && e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      dispatch({ type: 'SUBMIT_SENTENCE' });
+    }
+  }, [state.isPaused, state.isCompleted, state.settings.inputMode]);
 
-  const skip = useCallback(() => dispatch({ type: 'SKIP_TOKEN' }), []);
-  const reveal = useCallback(() => dispatch({ type: 'REVEAL_TOKEN' }), []);
+  const skip = useCallback(() => {
+    if (state.settings.inputMode === 'sentence') {
+      dispatch({ type: 'SKIP_SENTENCE' });
+    } else {
+      dispatch({ type: 'SKIP_TOKEN' });
+    }
+  }, [state.settings.inputMode]);
+
+  const reveal = useCallback(() => {
+    if (state.settings.inputMode === 'sentence') {
+      dispatch({ type: 'REVEAL_SENTENCE' });
+    } else {
+      dispatch({ type: 'REVEAL_TOKEN' });
+    }
+  }, [state.settings.inputMode]);
+
   const reset = useCallback(() => dispatch({ type: 'RESET' }), []);
   const pause = useCallback(() => dispatch({ type: 'PAUSE' }), []);
   const resume = useCallback(() => dispatch({ type: 'RESUME' }), []);
+  
+  const setTypingActive = useCallback((active: boolean) => {
+    dispatch({ type: 'SET_TYPING_ACTIVE', payload: active });
+  }, []);
+
   const updateSettings = useCallback((settings: Partial<TrainerSettings>) => {
     dispatch({ type: 'UPDATE_SETTINGS', payload: settings });
   }, []);
+
   const selectRange = useCallback((range: { start: number; end: number } | null) => {
     dispatch({ type: 'SELECT_RANGE', payload: range });
   }, []);
@@ -365,9 +530,14 @@ export function useTrainer() {
     return { wpm, accuracy, time };
   }, [state]);
 
+  const currentSentence = state.sentences[state.activeSentenceIndex] || null;
+  const currentToken = state.tokens[state.activeIndex] || null;
+
   return {
     state,
     loadText,
+    setInput,
+    submitSentence,
     handleKeyDown,
     skip,
     reveal,
@@ -376,6 +546,9 @@ export function useTrainer() {
     resume,
     updateSettings,
     selectRange,
+    setTypingActive,
     calculateStats,
+    currentSentence,
+    currentToken,
   };
 }
